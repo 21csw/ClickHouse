@@ -223,12 +223,22 @@ void StatelessWorkerEndpoint::processQuery(const HTMLForm & params, ReadBufferPt
         if (params.has("client_version"))
             client_version = parse<UInt64>(params.get("client_version"));
 
+
+        //TODO why did we introduce this?
+        /// `status_version` supersedes `client_version` for format negotiation: old workers
+        /// ignore the unknown parameter (a new coordinator polling an old worker gets the
+        /// legacy format and detects it by the absent response header), and old coordinators
+        /// do not send it (the response stays in the legacy format for them).
+        if (params.has("status_version"))
+            client_version = std::min<UInt64>(parse<UInt64>(params.get("status_version")), DBMS_TCP_PROTOCOL_VERSION);
+
         body->eof();
         body.reset();
 
         auto status = task_runner->getStatus(task_id, wait_milliseconds);
         DistributedQueryTaskStatus task_status;
         task_status.progress = std::move(status.progress);
+        task_status.logs = std::move(status.logs);
 
         switch (status.result)
         {
@@ -273,6 +283,9 @@ void StatelessWorkerEndpoint::processQuery(const HTMLForm & params, ReadBufferPt
                 break;
             }
         }
+        /// Advertise the exact version this response is serialized with, so the client
+        /// never has to guess the format (absent header == legacy format, old worker).
+        response.set("X-ClickHouse-Task-Status-Version", toString(client_version));
         task_status.write(out, client_version);
     }
     else if (operation == "cancel")
